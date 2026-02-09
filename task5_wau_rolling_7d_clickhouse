@@ -1,0 +1,75 @@
+/* =========================================================
+   ClickHouse | WAU 7D rolling, step = 1 day (inclusive)
+   Таблица: dwh.site_activity(action_id, timestamp, user_id, action, item_url)
+   WAU(D) = uniq(user_id) за период [D-6; D] включительно
+   Даты: от min(date) в данных до max(max(date в данных), today())
+   ========================================================= */
+
+
+/* ---------------------------------------------------------
+   Вариант 1: считаем по событиям (может быть тяжелее на больших объёмах)
+   --------------------------------------------------------- */
+WITH
+    (SELECT toDate(min(`timestamp`)) FROM dwh.site_activity) AS date_min,
+    greatest(
+        (SELECT toDate(max(`timestamp`)) FROM dwh.site_activity),
+        today()
+    ) AS date_max
+SELECT
+    d AS as_of_date,
+    uniqExactIf(a.user_id, isNotNull(a.user_id)) AS wau_7d
+FROM
+(
+    SELECT arrayJoin(
+        arrayMap(
+            i -> addDays(date_min, i),
+            range(toUInt32(dateDiff('day', date_min, date_max) + 1))
+        )
+    ) AS d
+) AS dates
+LEFT JOIN dwh.site_activity AS a
+    ON toDate(a.`timestamp`) BETWEEN addDays(d, -6) AND d
+GROUP BY
+    d
+ORDER BY
+    d
+;
+
+
+/* ---------------------------------------------------------
+   Вариант 2 (рекомендуемый): дедупликация (день, пользователь)
+   Обычно быстрее, если много событий на пользователя в день.
+   --------------------------------------------------------- */
+WITH
+    (SELECT toDate(min(`timestamp`)) FROM dwh.site_activity) AS date_min,
+    greatest(
+        (SELECT toDate(max(`timestamp`)) FROM dwh.site_activity),
+        today()
+    ) AS date_max
+SELECT
+    d AS as_of_date,
+    uniqExactIf(du.user_id, isNotNull(du.user_id)) AS wau_7d
+FROM
+(
+    SELECT arrayJoin(
+        arrayMap(
+            i -> addDays(date_min, i),
+            range(toUInt32(dateDiff('day', date_min, date_max) + 1))
+        )
+    ) AS d
+) AS dates
+LEFT JOIN
+(
+    SELECT
+        toDate(`timestamp`) AS dt,
+        user_id
+    FROM dwh.site_activity
+    GROUP BY
+        dt, user_id
+) AS du
+    ON du.dt BETWEEN addDays(d, -6) AND d
+GROUP BY
+    d
+ORDER BY
+    d
+;
